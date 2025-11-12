@@ -4,6 +4,7 @@
 
 using Bogus;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System.Text;
 using System.Text.Json;
 
@@ -24,6 +25,7 @@ builder.AddContainer("pgmcp", "crystaldba/postgres-mcp")
        .WithArgs("--transport=sse")
        .WaitFor(postgresdb)
        .WithParentRelationship(postgres)
+       .WithIconName("WindowDevTools")
        .ExcludeFromManifest();
 
 // Add the web app with a reference to the database
@@ -50,7 +52,7 @@ var app = builder.AddProject("app", "./AppWithDb")
 
 var projectDirectory = Path.GetDirectoryName(app.Resource.GetProjectMetadata().ProjectPath)!;
 
-// dotnet ef 
+// dotnet ef
 var efmigrate = builder.AddEfMigrate("ef-migrate", projectDirectory, postgresdb);
 
 // Ensure the app is built before running
@@ -58,85 +60,9 @@ app.WaitForCompletion(efmigrate);
 app.WithChildRelationship(efmigrate);
 
 // Add a seed-data command
-app.WithCommand("seed-data", "Seed the database with fake data using Bogus", async context =>
-{
-    await SeedDatabaseAsync(app, context.CancellationToken);
-    return new ExecuteCommandResult { Success = true };
-});
+app.WithDataPopulation();
 
 builder.Build().Run();
-
-#region SEED API
-
-static async Task SeedDatabaseAsync(IResourceBuilder<ProjectResource> app, CancellationToken cancellationToken)
-{
-    Console.WriteLine("🌱 Starting database seeding with Bogus...");
-
-    // Wait a bit for the app to be fully ready
-    using var httpClient = new HttpClient();
-
-    // Get the actual endpoint URL dynamically
-    var httpEndpoint = app.GetEndpoint("http");
-    var baseUrl = await httpEndpoint.GetValueAsync(cancellationToken);
-
-    // Create a Faker for Person data - using object initializer approach
-    var personFaker = new Faker();
-
-    Console.WriteLine($"📊 Generating 50 fake people. Starting to seed...");
-    Console.WriteLine($"🔗 Using endpoint: {baseUrl}");
-
-    int successCount = 0;
-    int errorCount = 0;
-
-    for (int i = 0; i < 50; i++)
-    {
-        try
-        {
-            // Generate fake person data
-            var firstName = personFaker.Name.FirstName();
-            var lastName = personFaker.Name.LastName();
-            var email = personFaker.Internet.Email(firstName, lastName);
-            var dateOfBirth = personFaker.Date.Between(DateTime.Now.AddYears(-80), DateTime.Now.AddYears(-18));
-
-            var person = new
-            {
-                firstName,
-                lastName,
-                email,
-                dateOfBirth = dateOfBirth.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-            };
-
-            var json = JsonSerializer.Serialize(person);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var response = await httpClient.PostAsync($"{baseUrl}/people", content, cancellationToken);
-
-            if (response.IsSuccessStatusCode)
-            {
-                successCount++;
-                Console.WriteLine($"✅ Created: {firstName} {lastName} ({email})");
-            }
-            else
-            {
-                errorCount++;
-                var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
-                Console.WriteLine($"❌ Failed to create {firstName} {lastName}: {response.StatusCode} - {errorContent}");
-            }
-        }
-        catch (Exception ex)
-        {
-            errorCount++;
-            Console.WriteLine($"💥 Exception creating person {i}: {ex.Message}");
-        }
-
-        // Small delay between requests
-        await Task.Delay(50, cancellationToken);
-    }
-
-    Console.WriteLine($"🎉 Seeding complete! Created {successCount} people, {errorCount} errors.");
-}
-
-#endregion
 
 #region Extension Methods
 
@@ -146,16 +72,18 @@ public static class ExtMethods
     {
         public IResourceBuilder<ExecutableResource> AddEfMigrate(string name, string projectDirectory, IResourceBuilder<IResourceWithConnectionString> database)
         {
-            return builder.AddExecutable(name, "dotnet", projectDirectory)
+            var efmigrate = builder.AddExecutable(name, "dotnet", projectDirectory)
                 .WithArgs("ef")
                 .WithArgs("database")
                 .WithArgs("update")
                 .WithArgs("--no-build")
                 .WithArgs("--connection")
-                .WithArgs(database.Resource.ConnectionStringExpression)
+                .WithArgs(database.Resource)
                 .WithEnvironment("DOTNET_ENVIRONMENT", "Development")
                 .WaitFor(database)
                 .WithReference(database);
+
+            return efmigrate;
         }
     }
 
@@ -173,6 +101,86 @@ public static class ExtMethods
             resourceBuilder.WaitForCompletion(projectBuild);
 
             return resourceBuilder;
+        }
+
+        public IResourceBuilder<ProjectResource> WithDataPopulation()
+        {
+            return resourceBuilder.WithCommand("seed-data", "Seed the database with fake data using Bogus", async context =>
+            {
+                await SeedDatabaseAsync(resourceBuilder, context);
+                return new ExecuteCommandResult { Success = true };
+            });
+
+            static async Task SeedDatabaseAsync(IResourceBuilder<ProjectResource> app, ExecuteCommandContext context)
+            {
+                var cancellationToken = context.CancellationToken;
+                var logger = context.ServiceProvider.GetRequiredService<ResourceLoggerService>().GetLogger(app.Resource);
+
+                logger.LogInformation("🌱 Starting database seeding with Bogus...");
+
+                // Wait a bit for the app to be fully ready
+                using var httpClient = new HttpClient();
+
+                // Get the actual endpoint URL dynamically
+                var httpEndpoint = app.GetEndpoint("http");
+                var baseUrl = await httpEndpoint.GetValueAsync(cancellationToken);
+
+                // Create a Faker for Person data - using object initializer approach
+                var personFaker = new Faker();
+
+                logger.LogInformation($"📊 Generating 50 fake people. Starting to seed...");
+                logger.LogInformation("🔗 Using endpoint: {baseUrl}", baseUrl);
+
+                int successCount = 0;
+                int errorCount = 0;
+
+                for (int i = 0; i < 50; i++)
+                {
+                    try
+                    {
+                        // Generate fake person data
+                        var firstName = personFaker.Name.FirstName();
+                        var lastName = personFaker.Name.LastName();
+                        var email = personFaker.Internet.Email(firstName, lastName);
+                        var dateOfBirth = personFaker.Date.Between(DateTime.Now.AddYears(-80), DateTime.Now.AddYears(-18));
+
+                        var person = new
+                        {
+                            firstName,
+                            lastName,
+                            email,
+                            dateOfBirth = dateOfBirth.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                        };
+
+                        var json = JsonSerializer.Serialize(person);
+                        var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                        var response = await httpClient.PostAsync($"{baseUrl}/people", content, cancellationToken);
+
+                        if (response.IsSuccessStatusCode)
+                        {
+                            successCount++;
+                            logger.LogInformation("✅ Created: {FirstName} {LastName} ({Email})", firstName, lastName, email);
+                        }
+                        else
+                        {
+                            errorCount++;
+                            var errorContent = await response.Content.ReadAsStringAsync(cancellationToken);
+                            logger.LogError("❌ Failed to create {FirstName} {LastName}: {StatusCode} - {ErrorContent}", firstName, lastName, response.StatusCode, errorContent);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        errorCount++;
+                        logger.LogError("💥 Exception creating person {Index}: {Message}", i, ex.Message);
+                    }
+
+                    // Small delay between requests
+                    await Task.Delay(50, cancellationToken);
+                }
+
+                logger.LogInformation("🎉 Seeding complete! Created {SuccessCount} people, {ErrorCount} errors.", successCount, errorCount);
+            }
         }
     }
 
