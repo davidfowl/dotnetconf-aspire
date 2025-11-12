@@ -1,14 +1,20 @@
-﻿#:package Aspire.Hosting.PostgreSQL@13.0.0
+﻿#:package Aspire.Hosting.Docker@13.0.0-preview.1.25560.3
+#:package Aspire.Hosting.PostgreSQL@13.0.0
 #:package Bogus@35.6.1
 #:sdk Aspire.AppHost.Sdk@13.0.0
 
+using Aspire.Hosting.Pipelines;
 using Bogus;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Projects;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
 var builder = DistributedApplication.CreateBuilder(args);
+
+builder.AddDockerComposeEnvironment("dc");
 
 // Add PostgreSQL database
 var postgres = builder.AddPostgres("postgres")
@@ -33,6 +39,7 @@ var app = builder.AddProject("app", "./AppWithDb")
     .WithHttpHealthCheck("/health")
     .WithReference(postgresdb)
     .WaitFor(postgresdb)
+    .WithExternalHttpEndpoints()
     .WithBuild() // what is this?
     .WithUrls(context =>
     {
@@ -50,10 +57,8 @@ var app = builder.AddProject("app", "./AppWithDb")
         });
     });
 
-var projectDirectory = Path.GetDirectoryName(app.Resource.GetProjectMetadata().ProjectPath)!;
-
 // dotnet ef
-var efmigrate = builder.AddEfMigrate("ef-migrate", projectDirectory, postgresdb);
+var efmigrate = builder.AddEfMigrate(app, postgresdb);
 
 // Ensure the app is built before running
 app.WaitForCompletion(efmigrate);
@@ -70,9 +75,11 @@ public static class ExtMethods
 {
     extension(IDistributedApplicationBuilder builder)
     {
-        public IResourceBuilder<ExecutableResource> AddEfMigrate(string name, string projectDirectory, IResourceBuilder<IResourceWithConnectionString> database)
+        public IResourceBuilder<ExecutableResource> AddEfMigrate(IResourceBuilder<ProjectResource> app, IResourceBuilder<IResourceWithConnectionString> database)
         {
-            var efmigrate = builder.AddExecutable(name, "dotnet", projectDirectory)
+            var projectDirectory = Path.GetDirectoryName(app.Resource.GetProjectMetadata().ProjectPath)!;
+
+            var efmigrate = builder.AddExecutable($"ef-migrate-{app.Resource.Name}", "dotnet", projectDirectory)
                 .WithArgs("ef")
                 .WithArgs("database")
                 .WithArgs("update")
@@ -82,6 +89,31 @@ public static class ExtMethods
                 .WithEnvironment("DOTNET_ENVIRONMENT", "Development")
                 .WaitFor(database)
                 .WithReference(database);
+
+            efmigrate.WithPipelineStepFactory(factoryContext =>
+            {
+                var step = new PipelineStep
+                {
+                    Name = $"ef-migration-bundle-{app.Resource.Name}",
+                    RequiredBySteps = ["deploy"],
+                    Action = async context =>
+                    {
+                        var psi = new ProcessStartInfo
+                        {
+                            FileName = "dotnet",
+                            RedirectStandardError = true,
+                            RedirectStandardOutput = true,
+                            WorkingDirectory = projectDirectory
+                        };
+                        // dotnet ef migrations bundle --self-contained -r linux-x64
+                        psi = psi.WithArgs("ef", "migrations", "bundle", "--self-contained", "-r", "linux-x64");
+
+                        await psi.ExecuteAsync(context.Logger, context.CancellationToken);
+                    }
+                };
+
+                return [step];
+            });
 
             return efmigrate;
         }
@@ -203,6 +235,67 @@ public static class ExtMethods
                 // Custom reset logic if needed
                 return new ExecuteCommandResult { Success = true };
             });
+        }
+    }
+
+    extension(ProcessStartInfo psi)
+    {
+        public ProcessStartInfo WithArgs(params string[] args)
+        {
+            foreach (var arg in args)
+            {
+                psi.ArgumentList.Add(arg);
+            }
+            return psi;
+        }
+
+        // Exec with logs
+
+        public Task<int> ExecuteAsync(ILogger logger, CancellationToken cancellationToken = default)
+        {
+            var tcs = new TaskCompletionSource<int>();
+
+            var process = new Process
+            {
+                StartInfo = psi,
+                EnableRaisingEvents = true
+            };
+
+            process.OutputDataReceived += (sender, e) =>
+            {
+                if (e.Data != null)
+                {
+                    logger.LogDebug(e.Data);
+                }
+            };
+
+            process.ErrorDataReceived += (sender, e) =>
+            {
+                if (e.Data != null)
+                {
+                    logger.LogDebug(e.Data);
+                }
+            };
+
+            process.Exited += (sender, e) =>
+            {
+                tcs.SetResult(process.ExitCode);
+                process.Dispose();
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            cancellationToken.Register(() =>
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                }
+            });
+
+            return tcs.Task;
         }
     }
 }

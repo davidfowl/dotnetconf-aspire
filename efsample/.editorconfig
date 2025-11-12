@@ -2,3 +2,9 @@
 
 # ASPIREINTERACTION001: Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 dotnet_diagnostic.ASPIREINTERACTION001.severity = silent
+
+# IDE0320: Make anonymous function static
+dotnet_diagnostic.IDE0320.severity = silent
+
+# ASPIREPIPELINES001: Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+dotnet_diagnostic.ASPIREPIPELINES001.severity = silent
