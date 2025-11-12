@@ -95,7 +95,7 @@ public static class ExtMethods
                 var step = new PipelineStep
                 {
                     Name = $"ef-migration-bundle-{app.Resource.Name}",
-                    RequiredBySteps = ["deploy"],
+                    Tags = [WellKnownPipelineTags.BuildCompute],
                     Action = async context =>
                     {
                         var psi = new ProcessStartInfo
@@ -113,6 +113,15 @@ public static class ExtMethods
                 };
 
                 return [step];
+            });
+
+            efmigrate.WithPipelineConfiguration(context =>
+            {
+                var appContainerBuildSteps = context.GetSteps(app.Resource, WellKnownPipelineTags.BuildCompute);
+
+                var migrationBundle = context.GetSteps(efmigrate.Resource, WellKnownPipelineTags.BuildCompute);
+
+                appContainerBuildSteps.DependsOn(migrationBundle);
             });
 
             return efmigrate;
