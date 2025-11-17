@@ -7,7 +7,6 @@ using Aspire.Hosting.Pipelines;
 using Bogus;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Projects;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -23,6 +22,7 @@ var postgres = builder.AddPostgres("postgres")
 var postgresdb = postgres.AddDatabase("appdb")
     .WithResetDbCommand();
 
+#region EM ZEE PEE
 // PG MCP
 builder.AddContainer("pgmcp", "crystaldba/postgres-mcp")
        .WithHttpEndpoint(port: 8000, targetPort: 8000)
@@ -33,14 +33,15 @@ builder.AddContainer("pgmcp", "crystaldba/postgres-mcp")
        .WithParentRelationship(postgres)
        .WithIconName("WindowDevTools")
        .ExcludeFromManifest();
+#endregion
 
 // Add the web app with a reference to the database
-var app = builder.AddProject("app", "./AppWithDb")
+var app = builder.AddCSharpApp("app", "./AppWithDb")
     .WithHttpHealthCheck("/health")
     .WithReference(postgresdb)
     .WaitFor(postgresdb)
     .WithExternalHttpEndpoints()
-    .WithBuild() // what is this?
+    //.WithBuild() // what is this?
     .WithUrls(context =>
     {
         foreach (var u in context.Urls)
@@ -79,7 +80,10 @@ public static class ExtMethods
         {
             var projectDirectory = Path.GetDirectoryName(app.Resource.GetProjectMetadata().ProjectPath)!;
 
-            var efmigrate = builder.AddExecutable($"ef-migrate-{app.Resource.Name}", "dotnet", projectDirectory)
+            var efmigrate = builder.AddExecutable(
+                            $"ef-migrate-{app.Resource.Name}", 
+                            "dotnet", 
+                            projectDirectory)
                 .WithArgs("ef")
                 .WithArgs("database")
                 .WithArgs("update")
@@ -87,8 +91,7 @@ public static class ExtMethods
                 .WithArgs("--connection")
                 .WithArgs(database.Resource)
                 .WithEnvironment("DOTNET_ENVIRONMENT", "Development")
-                .WaitFor(database)
-                .WithReference(database);
+                .WaitFor(database);
 
             efmigrate.WithPipelineStepFactory(factoryContext =>
             {
@@ -135,7 +138,10 @@ public static class ExtMethods
         {
             var projectDirectory = Path.GetDirectoryName(resourceBuilder.Resource.GetProjectMetadata().ProjectPath)!;
 
-            var projectBuild = resourceBuilder.ApplicationBuilder.AddExecutable($"build-{resourceBuilder.Resource.Name}", "dotnet", projectDirectory)
+            var projectBuild = resourceBuilder.ApplicationBuilder.AddExecutable(
+                $"build-{resourceBuilder.Resource.Name}", 
+                "dotnet", 
+                projectDirectory)
                            .WithArgs("build");
 
             resourceBuilder.WithChildRelationship(projectBuild);
@@ -240,6 +246,14 @@ public static class ExtMethods
                 {
                     return new ExecuteCommandResult { Success = false, ErrorMessage = "Database reset cancelled by user." };
                 }
+
+                var rcs = context.ServiceProvider.GetRequiredService<ResourceCommandService>();
+
+                // Cheating because there's no volume, just reboot the container
+                await rcs.ExecuteCommandAsync(
+                        resourceBuilder.Resource.Parent, 
+                        KnownResourceCommands.RestartCommand, 
+                        context.CancellationToken);
 
                 // Custom reset logic if needed
                 return new ExecuteCommandResult { Success = true };
